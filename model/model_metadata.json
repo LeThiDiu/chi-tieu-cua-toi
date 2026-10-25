@@ -1,0 +1,160 @@
+{
+  "model_name": "expense_category_classifier",
+  "version": "1.0.0",
+  "algorithm": "LogisticRegression",
+  "trained_at": "2026-10-24T15:19:03",
+  "n_samples": 2142,
+  "categories": [
+    "Chăm sóc cá nhân",
+    "Di chuyển",
+    "Gia dụng",
+    "Giải trí",
+    "Học tập",
+    "Thực phẩm",
+    "Y tế",
+    "Ăn uống",
+    "Đồ uống"
+  ],
+  "fallback_category": "Khác",
+  "min_confidence": 0.35,
+  "metrics_test": {
+    "split": "GroupShuffleSplit theo tên sản phẩm gốc (sản phẩm CHƯA từng gặp)",
+    "accuracy": 0.485,
+    "macro_f1": 0.4595,
+    "per_class_f1": {
+      "Chăm sóc cá nhân": 0.495,
+      "Di chuyển": 0.81,
+      "Gia dụng": 0.42,
+      "Giải trí": 0.484,
+      "Học tập": 0.368,
+      "Thực phẩm": 0.09,
+      "Y tế": 0.19,
+      "Ăn uống": 0.712,
+      "Đồ uống": 0.567
+    }
+  },
+  "model_comparison": {
+    "LogisticRegression": {
+      "accuracy": 0.485,
+      "macro_f1": 0.4595
+    },
+    "MultinomialNB": {
+      "accuracy": 0.4942,
+      "macro_f1": 0.4394
+    }
+  },
+  "confusion_matrix": {
+    "labels": [
+      "Chăm sóc cá nhân",
+      "Di chuyển",
+      "Gia dụng",
+      "Giải trí",
+      "Học tập",
+      "Thực phẩm",
+      "Y tế",
+      "Ăn uống",
+      "Đồ uống"
+    ],
+    "matrix": [
+      [
+        26,
+        0,
+        0,
+        0,
+        0,
+        8,
+        0,
+        0,
+        1
+      ],
+      [
+        0,
+        64,
+        0,
+        0,
+        0,
+        23,
+        7,
+        0,
+        0
+      ],
+      [
+        1,
+        0,
+        17,
+        8,
+        0,
+        0,
+        25,
+        9,
+        1
+      ],
+      [
+        0,
+        0,
+        0,
+        15,
+        10,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        2,
+        0,
+        16,
+        14,
+        10,
+        0,
+        10
+      ],
+      [
+        24,
+        0,
+        0,
+        8,
+        0,
+        5,
+        0,
+        14,
+        2
+      ],
+      [
+        10,
+        0,
+        0,
+        6,
+        0,
+        8,
+        8,
+        0,
+        2
+      ],
+      [
+        0,
+        0,
+        1,
+        0,
+        9,
+        0,
+        0,
+        42,
+        1
+      ],
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        17
+      ]
+    ]
+  }
+}
