@@ -17,6 +17,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from . import demo_data
+
 try:  # nạp biến môi trường từ backend/.env nếu có
     from dotenv import load_dotenv
 
@@ -34,6 +36,14 @@ FEEDBACK_CSV = os.path.join(classifier.MODEL_DIR, "data", "feedback.csv")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # Render Free xóa ổ đĩa mỗi lần service ngủ/khởi động lại -> tự nạp dữ liệu demo khi database trống.
+    # Mặc định chỉ bật trên Render (biến RENDER do Render tự đặt); bật/tắt thủ công bằng AUTO_SEED_DEMO=1/0.
+    if os.environ.get("AUTO_SEED_DEMO", "1" if os.environ.get("RENDER") else "0") == "1":
+        try:
+            if demo_data.seed_if_empty():
+                print("[INFO] Database trống -> đã nạp dữ liệu demo.")
+        except Exception as e:  # không để lỗi seed làm sập API
+            print(f"[CẢNH BÁO] Không nạp được dữ liệu demo: {e}")
     try:
         classifier.load_model()  # nạp model một lần khi khởi động
     except classifier.ModelNotReady as e:
