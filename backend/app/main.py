@@ -17,8 +17,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import demo_data
-
 try:  # nạp biến môi trường từ backend/.env nếu có
     from dotenv import load_dotenv
 
@@ -26,7 +24,7 @@ try:  # nạp biến môi trường từ backend/.env nếu có
 except ImportError:
     pass
 
-from . import classifier, db, insights, invoice
+from . import classifier, db, demo_data, insights, invoice
 
 DEFAULT_CATEGORIES = ["Ăn uống", "Đồ uống", "Thực phẩm", "Gia dụng", "Chăm sóc cá nhân",
                       "Y tế", "Di chuyển", "Học tập", "Giải trí", "Khác"]
@@ -171,7 +169,8 @@ def _tx(row) -> dict:
 @app.get("/api/health")
 def health():
     return {"status": "ok", "model_ready": classifier.is_ready(),
-            "gemini_configured": bool(os.environ.get("GEMINI_API_KEY"))}
+            "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+            "database": db.backend_name()}
 
 
 @app.get("/api/model-info")

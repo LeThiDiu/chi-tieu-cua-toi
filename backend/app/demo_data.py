@@ -54,14 +54,15 @@ def seed(reset: bool = False) -> tuple[int, int]:
         conn.executemany(
             "INSERT INTO transactions(date,name,quantity,amount,category,store) VALUES (?,?,?,?,?,?)", rows)
         for c, v in BUDGETS.items():
-            conn.execute("INSERT OR REPLACE INTO budgets(category, monthly_limit) VALUES (?,?)", (c, v))
+            conn.execute("INSERT INTO budgets(category, monthly_limit) VALUES (?,?) "
+                         "ON CONFLICT(category) DO UPDATE SET monthly_limit=excluded.monthly_limit", (c, v))
     return len(rows), len(BUDGETS)
 
 
 def seed_if_empty() -> bool:
     """Chỉ nạp demo khi chưa có giao dịch nào. Trả về True nếu đã nạp."""
     with db.session() as conn:
-        n = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        n = conn.execute("SELECT COUNT(*) AS n FROM transactions").fetchone()["n"]
     if n == 0:
         seed()
         return True
