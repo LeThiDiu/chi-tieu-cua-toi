@@ -143,5 +143,14 @@ bash
 cd backend
 source .venv/Scripts/activate
 python -m uvicorn app.main:app --port 8000
-#   c h i - t i e u - c u a - t o i  
+#   c h i - t i e u - c u a - t o i 
  
+ 
+Giao diện: https://chi-tieu-cua-toi-ohqp.vercel.app
+Backend: https://chi-tieu-api-9sxg.onrender.com
+
+Mở https://chi-tieu-api-9sxg.onrender.com/api/health và chờ 30-60 giây cho backend thức dậy, đến khi thấy status: ok.
+Mở https://chi-tieu-cua-toi-ohqp.vercel.app rồi nhấn Ctrl + F5.
+Dashboard sẽ tự có dữ liệu mẫu, bạn không phải nhập.
+
+Nếu vào thẳng link Vercel mà thấy lỗi đỏ “Không kết nối được máy chủ” thì bạn chỉ cần chờ thêm một chút rồi tải lại.

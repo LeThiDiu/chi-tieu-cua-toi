@@ -20,29 +20,31 @@ def fmt(n) -> str:
     return f"{n:,.0f}".replace(",", ".") + " đ"
 
 
-def monthly_stats(conn, month: str) -> dict:
+def monthly_stats(conn, month: str, uid: int) -> dict:
     first, last = month_bounds(month)
     rows = conn.execute(
         "SELECT category, SUM(amount) AS total, COUNT(*) AS n FROM transactions "
-        "WHERE date BETWEEN ? AND ? GROUP BY category ORDER BY total DESC",
-        (first.isoformat(), last.isoformat()),
+        "WHERE user_id = ? AND date BETWEEN ? AND ? GROUP BY category ORDER BY total DESC",
+        (uid, first.isoformat(), last.isoformat()),
     ).fetchall()
     by_cat = [{"category": r["category"], "total": r["total"], "count": r["n"]} for r in rows]
     daily = conn.execute(
-        "SELECT date, SUM(amount) AS total FROM transactions WHERE date BETWEEN ? AND ? GROUP BY date ORDER BY date",
-        (first.isoformat(), last.isoformat()),
+        "SELECT date, SUM(amount) AS total FROM transactions WHERE user_id = ? AND date BETWEEN ? AND ? "
+        "GROUP BY date ORDER BY date",
+        (uid, first.isoformat(), last.isoformat()),
     ).fetchall()
     top_items = conn.execute(
         "SELECT name, SUM(amount) AS total, SUM(quantity) AS qty FROM transactions "
-        "WHERE date BETWEEN ? AND ? GROUP BY name ORDER BY total DESC LIMIT 5",
-        (first.isoformat(), last.isoformat()),
+        "WHERE user_id = ? AND date BETWEEN ? AND ? GROUP BY name ORDER BY total DESC LIMIT 5",
+        (uid, first.isoformat(), last.isoformat()),
     ).fetchall()
     # 6 tháng gần nhất để vẽ xu hướng
     trend, cur = [], month
     for _ in range(6):
         f, l = month_bounds(cur)
-        t = conn.execute("SELECT COALESCE(SUM(amount),0) AS t FROM transactions WHERE date BETWEEN ? AND ?",
-                         (f.isoformat(), l.isoformat())).fetchone()["t"]
+        t = conn.execute("SELECT COALESCE(SUM(amount),0) AS t FROM transactions "
+                         "WHERE user_id = ? AND date BETWEEN ? AND ?",
+                         (uid, f.isoformat(), l.isoformat())).fetchone()["t"]
         trend.append({"month": cur, "total": t})
         cur = prev_month(cur)
     trend.reverse()
@@ -83,25 +85,27 @@ def _forecast(spent: float, prev_total: float | None, month: str, today: date) -
     return {"value": round(value), "method": method, "confidence": conf, "daily_rate": round(rate)}
 
 
-def anomalies(conn, month: str) -> list[dict]:
+def anomalies(conn, month: str, uid: int) -> list[dict]:
     """Khoản chi bất thường trong tháng: so với lịch sử cùng danh mục (median + MAD, bền với outlier)."""
     first, last = month_bounds(month)
     hist_from = (first - timedelta(days=120)).isoformat()
     out = []
     cats = [r["category"] for r in conn.execute(
-        "SELECT DISTINCT category FROM transactions WHERE date BETWEEN ? AND ?", (first.isoformat(), last.isoformat()))]
+        "SELECT DISTINCT category FROM transactions WHERE user_id = ? AND date BETWEEN ? AND ?",
+        (uid, first.isoformat(), last.isoformat()))]
     for cat in cats:
         hist = [r["amount"] for r in conn.execute(
-            "SELECT amount FROM transactions WHERE category=? AND date >= ? AND date <= ?",
-            (cat, hist_from, last.isoformat()))]
+            "SELECT amount FROM transactions WHERE user_id = ? AND category=? AND date >= ? AND date <= ?",
+            (uid, cat, hist_from, last.isoformat()))]
         if len(hist) < 8:
             continue
         med = statistics.median(hist)
         mad = statistics.median([abs(x - med) for x in hist]) or max(1.0, med * 0.1)
         thr = med + 3.5 * 1.4826 * mad
         for r in conn.execute(
-            "SELECT id, date, name, amount FROM transactions WHERE category=? AND date BETWEEN ? AND ? AND amount > ?",
-            (cat, first.isoformat(), last.isoformat(), thr),
+            "SELECT id, date, name, amount FROM transactions "
+            "WHERE user_id = ? AND category=? AND date BETWEEN ? AND ? AND amount > ?",
+            (uid, cat, first.isoformat(), last.isoformat(), thr),
         ):
             if r["amount"] >= 2 * med:
                 out.append({"id": r["id"], "date": r["date"], "name": r["name"], "category": cat,
@@ -111,14 +115,15 @@ def anomalies(conn, month: str) -> list[dict]:
     return out[:8]
 
 
-def build_insights(conn, month: str, today: date | None = None) -> dict:
+def build_insights(conn, month: str, uid: int, today: date | None = None) -> dict:
     today = today or date.today()
-    stats = monthly_stats(conn, month)
-    prev = monthly_stats(conn, prev_month(month))
+    stats = monthly_stats(conn, month, uid)
+    prev = monthly_stats(conn, prev_month(month), uid)
     spent, prev_total = stats["total"], prev["total"] or None
     fc = _forecast(spent, prev_total, month, today)
 
-    budgets = {r["category"]: r["monthly_limit"] for r in conn.execute("SELECT * FROM budgets")}
+    budgets = {r["category"]: r["monthly_limit"] for r in conn.execute(
+        "SELECT category, monthly_limit FROM user_budgets WHERE user_id = ?", (uid,))}
     first, last = month_bounds(month)
     elapsed = max(1, min((today - first).days + 1, last.day)) if today >= first else 1
     cat_forecast = {}
@@ -144,7 +149,7 @@ def build_insights(conn, month: str, today: date | None = None) -> dict:
     order = {"over": 0, "warning": 1, "at_risk": 2, "ok": 3}
     alerts.sort(key=lambda a: (order[a["status"]], -a["ratio"]))
 
-    anoms = anomalies(conn, month)
+    anoms = anomalies(conn, month, uid)
 
     # lời khuyên dạng văn bản (luật nghiệp vụ, giải thích được)
     tips = []

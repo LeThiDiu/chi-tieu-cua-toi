@@ -6,10 +6,26 @@ import { catColor, monthLabel, shortDate, vnd } from "../format.js";
 const STATUS_TEXT = { over: "Vượt ngân sách", warning: "Sắp hết", at_risk: "Có nguy cơ vượt", ok: "Ổn" };
 const CONF_TEXT = { high: "độ tin cậy cao", medium: "độ tin cậy vừa", low: "mới đầu tháng nên chỉ mang tính tham khảo" };
 
-export default function Dashboard({ month, refreshKey, goScan }) {
+export default function Dashboard({ month, refreshKey, goScan, userName, onSeeded }) {
   const [stats, setStats] = useState(null);
   const [ins, setIns] = useState(null);
   const [err, setErr] = useState("");
+  const [seedMsg, setSeedMsg] = useState("");
+  const [seeding, setSeeding] = useState(false);
+
+  async function seedDemo() {
+    setSeeding(true);
+    setSeedMsg("");
+    try {
+      const res = await api.seedDemo();
+      if (res.seeded) onSeeded();
+      else setSeedMsg("Tài khoản của bạn đã có giao dịch ở tháng khác, hãy đổi tháng ở thanh bên (‹ ›).");
+    } catch (e) {
+      setSeedMsg(e.message);
+    } finally {
+      setSeeding(false);
+    }
+  }
 
   useEffect(() => {
     setErr("");
@@ -26,7 +42,14 @@ export default function Dashboard({ month, refreshKey, goScan }) {
       <section className="empty">
         <h1>{monthLabel(month)} chưa có chi tiêu</h1>
         <p>Chụp một hóa đơn để app tự đọc tên sản phẩm, số lượng và thành tiền.</p>
-        <button className="primary" onClick={goScan}>Quét hóa đơn</button>
+        <div className="empty-actions">
+          <button className="primary" onClick={goScan}>Quét hóa đơn</button>
+          <button className="secondary" onClick={seedDemo} disabled={seeding}>
+            {seeding ? "Đang nạp…" : "Nạp dữ liệu mẫu"}
+          </button>
+        </div>
+        {seedMsg && <p className="hint">{seedMsg}</p>}
+        <p className="hint">Dữ liệu mẫu chỉ nạp được khi tài khoản chưa có giao dịch nào, và chỉ hiện trong tài khoản của bạn.</p>
       </section>
     );
   }
@@ -40,7 +63,7 @@ export default function Dashboard({ month, refreshKey, goScan }) {
       <section className="welcome-banner">
         <div>
           <span className="eyebrow">TÀI CHÍNH CỦA BẠN, RÕ RÀNG HƠN</span>
-          <h1>Chào bạn, cùng xem lại chi tiêu nhé</h1>
+          <h1>{userName ? `Chào ${userName}, cùng xem lại chi tiêu nhé` : "Chào bạn, cùng xem lại chi tiêu nhé"}</h1>
           <p>Theo dõi ngân sách, hiểu thói quen và giữ mọi khoản chi trong tầm tay.</p>
         </div>
         <button className="primary" onClick={goScan}>＋ Quét hóa đơn</button>

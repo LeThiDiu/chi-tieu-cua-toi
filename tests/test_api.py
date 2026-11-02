@@ -16,7 +16,7 @@ os.environ.pop("GEMINI_API_KEY", None)  # test không gọi Gemini thật
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import main  # noqa: E402
+from app import db, main  # noqa: E402
 
 main.FEEDBACK_CSV = os.path.join(tempfile.mkdtemp(), "feedback.csv")
 SAMPLE = os.path.join(ROOT, "backend", "samples", "hoadon_mau.png")
@@ -49,6 +49,37 @@ def main_tests():
         check("Health", 200, lambda: c.get("/api/health"), lambda r: r.json()["model_ready"] or "model chưa nạp")
         check("Model info có metrics", 200, lambda: c.get("/api/model-info"),
               lambda r: "accuracy" in r.json()["metrics_test"])
+
+        # --- tài khoản: chưa đăng nhập thì bị chặn, đăng ký / đăng nhập / token
+        check("Chưa đăng nhập: danh sách giao dịch bị chặn", 401, lambda: c.get("/api/transactions"))
+        check("Chưa đăng nhập: thống kê bị chặn", 401, lambda: c.get("/api/stats"))
+        check("Chưa đăng nhập: phân loại bị chặn", 401, lambda: c.post("/api/categorize", json={"names": ["a"]}))
+        check("Token giả bị từ chối", 401, lambda: c.get("/api/auth/me", headers={"Authorization": "Bearer abc.def.ghi"}))
+        # dữ liệu có từ trước khi có đăng nhập (user_id rỗng) -> tài khoản ĐẦU TIÊN nhận lại
+        db.init_db()
+        with db.session() as conn:
+            conn.execute("INSERT INTO transactions(date,name,quantity,amount,category) VALUES ('2026-09-05','Dữ liệu cũ',1,12000,'Khác')")
+            conn.execute("INSERT INTO budgets(category, monthly_limit) VALUES ('Khác', 500000)")
+        reg = {"email": "Diu@Example.com", "password": "matkhau123", "name": "Diu"}
+        r = check("Đăng ký tài khoản A", 201, lambda: c.post("/api/auth/register", json=reg),
+                  lambda r: bool(r.json()["token"]) and r.json()["user"]["email"] == "diu@example.com" or r.json())
+        token_a = r.json()["token"]
+        check("Đăng ký: email trùng (không phân biệt hoa/thường)", 409,
+              lambda: c.post("/api/auth/register", json={**reg, "email": "DIU@example.com"}))
+        check("Đăng ký: mật khẩu quá ngắn", 422, lambda: c.post("/api/auth/register", json={**reg, "email": "x@y.vn", "password": "123"}))
+        check("Đăng ký: email sai định dạng", 422, lambda: c.post("/api/auth/register", json={**reg, "email": "khong-phai-email"}))
+        check("Đăng ký: tên rỗng", 422, lambda: c.post("/api/auth/register", json={**reg, "email": "x@y.vn", "name": "  "}))
+        check("Đăng nhập đúng", 200, lambda: c.post("/api/auth/login", json={"email": "diu@example.com", "password": "matkhau123"}),
+              lambda r: bool(r.json()["token"]))
+        check("Đăng nhập: sai mật khẩu", 401, lambda: c.post("/api/auth/login", json={"email": "diu@example.com", "password": "saimatkhau"}))
+        check("Đăng nhập: email không tồn tại", 401, lambda: c.post("/api/auth/login", json={"email": "ai@do.vn", "password": "matkhau123"}))
+        c.headers["Authorization"] = f"Bearer {token_a}"
+        check("Lấy thông tin tài khoản (/me)", 200, lambda: c.get("/api/auth/me"),
+              lambda r: r.json()["user"]["name"] == "Diu" or r.json())
+        check("Tài khoản đầu tiên nhận lại dữ liệu cũ", 200, lambda: c.get("/api/transactions?month=2026-09"),
+              lambda r: [i["name"] for i in r.json()["items"]] == ["Dữ liệu cũ"] or r.json())
+        check("Dữ liệu cũ kèm cả ngân sách cũ", 200, lambda: c.get("/api/budgets"),
+              lambda r: any(b["category"] == "Khác" and b["monthly_limit"] == 500000 for b in r.json()["budgets"]) or r.json())
 
         # --- phân loại
         check("Phân loại: cà phê -> Đồ uống", 200, lambda: c.post("/api/categorize", json={"names": ["Cà phê sữa đá"]}),
@@ -125,6 +156,30 @@ def main_tests():
         check("Insights: cảnh báo ngân sách Thực phẩm (64k/100k)", 200, lambda: c.get("/api/insights?month=2026-10"),
               lambda r: any(a["category"] == "Thực phẩm" and a["status"] in ("ok", "at_risk", "warning")
                             for a in r.json()["budget_alerts"]) or r.json()["budget_alerts"])
+
+        # --- tách dữ liệu giữa các tài khoản
+        check("Đăng ký tài khoản B", 201,
+              lambda: c.post("/api/auth/register", json={"email": "b@example.com", "password": "matkhau456", "name": "B"}))
+        token_b = c.post("/api/auth/login", json={"email": "b@example.com", "password": "matkhau456"}).json()["token"]
+        hb = {"Authorization": f"Bearer {token_b}"}
+        check("B không thấy giao dịch của A", 200, lambda: c.get("/api/transactions?limit=2000", headers=hb),
+              lambda r: r.json()["items"] == [] or f"B thấy {len(r.json()['items'])} giao dịch")
+        check("B không nhận dữ liệu cũ (chỉ tài khoản đầu tiên)", 200, lambda: c.get("/api/transactions?month=2026-09", headers=hb),
+              lambda r: r.json()["items"] == [])
+        check("B: thống kê trống", 200, lambda: c.get("/api/stats?month=2026-10", headers=hb), lambda r: r.json()["total"] == 0)
+        check("B: ngân sách của B không có giá trị của A", 200, lambda: c.get("/api/budgets", headers=hb),
+              lambda r: all(b["monthly_limit"] == 0 for b in r.json()["budgets"]) or r.json())
+        a_id = c.get("/api/transactions?month=2026-10").json()["items"][0]["id"]
+        check("B sửa giao dịch của A -> 404", 404, lambda: c.put(f"/api/transactions/{a_id}", json=good, headers=hb))
+        check("B xóa giao dịch của A -> 404", 404, lambda: c.delete(f"/api/transactions/{a_id}", headers=hb))
+        check("A vẫn còn giao dịch của mình", 200, lambda: c.get("/api/transactions?month=2026-10"),
+              lambda r: any(i["id"] == a_id for i in r.json()["items"]))
+        check("B nạp dữ liệu mẫu cho riêng B", 200, lambda: c.post("/api/demo/seed", headers=hb),
+              lambda r: r.json()["seeded"] is True)
+        check("B nạp lần hai: không nạp trùng", 200, lambda: c.post("/api/demo/seed", headers=hb),
+              lambda r: r.json()["seeded"] is False)
+        check("Dữ liệu mẫu của B không lọt sang A", 200, lambda: c.get("/api/transactions?month=2026-10"),
+              lambda r: len(r.json()["items"]) == 2 or f"A có {len(r.json()['items'])} giao dịch tháng 10")
     passed = sum(results)
     print(f"\nKết quả: {passed}/{len(results)} ca đạt")
     return passed == len(results)

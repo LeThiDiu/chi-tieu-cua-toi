@@ -21,8 +21,20 @@ def backend_name() -> str:
 
 # ----------------------------------------------------------------------------- schema
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS invoices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     store_name TEXT,
     date TEXT NOT NULL,
     total INTEGER NOT NULL,
@@ -31,6 +43,7 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     date TEXT NOT NULL,              -- YYYY-MM-DD
     name TEXT NOT NULL,
     quantity REAL NOT NULL DEFAULT 1,
@@ -42,16 +55,34 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(date);
-CREATE TABLE IF NOT EXISTS budgets (
+CREATE TABLE IF NOT EXISTS budgets (          -- bảng cũ (trước khi có tài khoản), chỉ dùng để chuyển dữ liệu
     category TEXT PRIMARY KEY,
     monthly_limit INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_budgets (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,
+    monthly_limit INTEGER NOT NULL,
+    PRIMARY KEY (user_id, category)
 );
 """
 
 _NOW_TEXT = "(to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))"
 PG_SCHEMA = [
+    f"""CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TEXT DEFAULT {_NOW_TEXT}
+    )""",
+    """CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )""",
     f"""CREATE TABLE IF NOT EXISTS invoices (
         id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
         store_name TEXT,
         date TEXT NOT NULL,
         total BIGINT NOT NULL,
@@ -60,6 +91,7 @@ PG_SCHEMA = [
     )""",
     f"""CREATE TABLE IF NOT EXISTS transactions (
         id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
         date TEXT NOT NULL,
         name TEXT NOT NULL,
         quantity DOUBLE PRECISION NOT NULL DEFAULT 1,
@@ -75,11 +107,21 @@ PG_SCHEMA = [
         category TEXT PRIMARY KEY,
         monthly_limit BIGINT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS user_budgets (
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        category TEXT NOT NULL,
+        monthly_limit BIGINT NOT NULL,
+        PRIMARY KEY (user_id, category)
+    )""",
+    # database đã tạo từ phiên bản chưa có tài khoản: thêm cột user_id
+    "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE",
+    "CREATE INDEX IF NOT EXISTS idx_tx_user_date ON transactions(user_id, date)",
 ]
 
 
 # ----------------------------------------------------------------------------- PostgreSQL adapter
-_INSERT_WITH_ID = re.compile(r"^\s*INSERT\s+INTO\s+(invoices|transactions)\b", re.I)
+_INSERT_WITH_ID = re.compile(r"^\s*INSERT\s+INTO\s+(invoices|transactions|users)\b", re.I)
 _LIKE = re.compile(r"\bLIKE\b", re.I)
 
 
@@ -150,7 +192,8 @@ def _pg_connect() -> _PgConn:
             except ValueError:
                 return float(s)
 
-    raw = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+    # prepare_threshold=None: tắt prepared statement phía server để chạy được cả qua cổng pooler (PgBouncer) của Neon
+    raw = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15, prepare_threshold=None)
     raw.adapters.register_loader("numeric", _NumLoader)
     return _PgConn(raw)
 
@@ -186,3 +229,16 @@ def init_db():
         return
     with session() as conn:
         conn.executescript(SCHEMA)
+        # database cũ (chưa có tài khoản): thêm cột user_id
+        for table in ("invoices", "transactions"):
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if "user_id" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_user_date ON transactions(user_id, date)")
+
+
+def is_integrity_error(exc: Exception) -> bool:
+    """Vi phạm ràng buộc (ví dụ trùng email), dùng được cho cả SQLite lẫn PostgreSQL."""
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    return type(exc).__module__.startswith("psycopg") and type(exc).__name__ in ("UniqueViolation", "IntegrityError")

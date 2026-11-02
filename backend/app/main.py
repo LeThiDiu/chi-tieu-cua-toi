@@ -10,7 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -24,7 +24,7 @@ try:  # nạp biến môi trường từ backend/.env nếu có
 except ImportError:
     pass
 
-from . import classifier, db, demo_data, insights, invoice
+from . import auth, classifier, db, demo_data, insights, invoice
 
 DEFAULT_CATEGORIES = ["Ăn uống", "Đồ uống", "Thực phẩm", "Gia dụng", "Chăm sóc cá nhân",
                       "Y tế", "Di chuyển", "Học tập", "Giải trí", "Khác"]
@@ -34,14 +34,7 @@ FEEDBACK_CSV = os.path.join(classifier.MODEL_DIR, "data", "feedback.csv")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    # Render Free xóa ổ đĩa mỗi lần service ngủ/khởi động lại -> tự nạp dữ liệu demo khi database trống.
-    # Mặc định chỉ bật trên Render (biến RENDER do Render tự đặt); bật/tắt thủ công bằng AUTO_SEED_DEMO=1/0.
-    if os.environ.get("AUTO_SEED_DEMO", "1" if os.environ.get("RENDER") else "0") == "1":
-        try:
-            if demo_data.seed_if_empty():
-                print("[INFO] Database trống -> đã nạp dữ liệu demo.")
-        except Exception as e:  # không để lỗi seed làm sập API
-            print(f"[CẢNH BÁO] Không nạp được dữ liệu demo: {e}")
+    auth.get_secret()  # tạo khóa ký token (nếu chưa có) ngay khi khởi động
     try:
         classifier.load_model()  # nạp model một lần khi khởi động
     except classifier.ModelNotReady as e:
@@ -83,6 +76,36 @@ def _check_date(v: str) -> str:
         return datetime.strptime(v, "%Y-%m-%d").date().isoformat()
     except ValueError:
         raise ValueError("ngày phải có dạng YYYY-MM-DD và hợp lệ")
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class RegisterIn(BaseModel):
+    email: str = Field(..., max_length=254)
+    password: str = Field(..., min_length=8, max_length=128)
+    name: str = Field(..., min_length=1, max_length=60)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v):
+        v = v.strip().lower()
+        if not EMAIL_RE.match(v):
+            raise ValueError("email không hợp lệ")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("tên không được để trống")
+        return v
+
+
+class LoginIn(BaseModel):
+    email: str = Field(..., max_length=254)
+    password: str = Field(..., min_length=1, max_length=128)
 
 
 class TxIn(BaseModel):
@@ -162,7 +185,9 @@ def _log_feedback(pairs: list[tuple[str, str]]):
 
 
 def _tx(row) -> dict:
-    return dict(row)
+    d = dict(row)
+    d.pop("user_id", None)
+    return d
 
 
 # ------------------------------------------------------------------ hệ thống / model
@@ -189,16 +214,66 @@ def get_categories():
 
 
 @app.post("/api/categorize")
-def categorize(body: CategorizeIn):
+def categorize(body: CategorizeIn, user: dict = Depends(auth.current_user)):
     names = [n.strip() for n in body.names if n.strip()]
     if not names:
         raise HTTPException(422, "names không có tên hợp lệ")
     return {"results": [{"name": n, **r} for n, r in zip(names, classifier.categorize(names))]}
 
 
+# ------------------------------------------------------------------ tài khoản
+@app.post("/api/auth/register", status_code=201)
+def register(body: RegisterIn):
+    pw_hash = auth.hash_password(body.password)
+    with db.session() as conn:
+        if conn.execute("SELECT id FROM users WHERE email = ?", (body.email,)).fetchone():
+            raise HTTPException(409, "Email này đã được đăng ký. Hãy đăng nhập.")
+        is_first = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 0
+        try:
+            uid = conn.execute("INSERT INTO users(email, name, password_hash) VALUES (?,?,?)",
+                               (body.email, body.name, pw_hash)).lastrowid
+        except Exception as e:  # noqa: BLE001
+            if db.is_integrity_error(e):
+                raise HTTPException(409, "Email này đã được đăng ký. Hãy đăng nhập.")
+            raise
+        if is_first:  # tài khoản đầu tiên nhận lại dữ liệu có từ trước khi có chức năng đăng nhập
+            conn.execute("UPDATE invoices SET user_id = ? WHERE user_id IS NULL", (uid,))
+            conn.execute("UPDATE transactions SET user_id = ? WHERE user_id IS NULL", (uid,))
+            conn.execute("INSERT INTO user_budgets(user_id, category, monthly_limit) "
+                         "SELECT ?, category, monthly_limit FROM budgets", (uid,))
+    return {"token": auth.make_token(uid), "user": {"id": uid, "email": body.email, "name": body.name}}
+
+
+@app.post("/api/auth/login")
+def login(body: LoginIn):
+    email = body.email.strip().lower()
+    auth.throttle_check(email)
+    with db.session() as conn:
+        row = conn.execute("SELECT id, email, name, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+    ok = auth.verify_password(body.password, row["password_hash"] if row else auth.DUMMY_HASH)
+    if not row or not ok:
+        auth.throttle_fail(email)
+        raise HTTPException(401, "Email hoặc mật khẩu không đúng.")
+    auth.throttle_clear(email)
+    return {"token": auth.make_token(row["id"]),
+            "user": {"id": row["id"], "email": row["email"], "name": row["name"]}}
+
+
+@app.get("/api/auth/me")
+def me(user: dict = Depends(auth.current_user)):
+    return {"user": user}
+
+
+@app.post("/api/demo/seed")
+def seed_demo_data(user: dict = Depends(auth.current_user)):
+    """Nạp dữ liệu mẫu cho tài khoản đang đăng nhập, chỉ khi tài khoản chưa có giao dịch nào."""
+    return {"seeded": demo_data.seed_if_empty(user["id"])}
+
+
 # ------------------------------------------------------------------ hóa đơn
 @app.post("/api/invoices/scan")
-async def scan_invoice(file: UploadFile = File(...), engine: str = Form("auto")):
+async def scan_invoice(file: UploadFile = File(...), engine: str = Form("auto"),
+                       user: dict = Depends(auth.current_user)):
     """Nhận ảnh hóa đơn -> tên sản phẩm, số lượng, thành tiền + danh mục gợi ý. CHƯA lưu vào DB."""
     if engine not in ("auto", "gemini", "tesseract"):
         raise HTTPException(422, "engine phải là auto, gemini hoặc tesseract")
@@ -217,7 +292,7 @@ async def scan_invoice(file: UploadFile = File(...), engine: str = Form("auto"))
 
 
 @app.post("/api/invoices", status_code=201)
-def save_invoice(body: InvoiceSaveIn):
+def save_invoice(body: InvoiceSaveIn, user: dict = Depends(auth.current_user)):
     """Lưu hóa đơn đã được người dùng xác nhận: tạo 1 invoice + mỗi dòng hàng là một giao dịch."""
     resolved, feedback = [], []
     for it in body.items:
@@ -227,12 +302,14 @@ def save_invoice(body: InvoiceSaveIn):
             feedback.append((it.name, it.category))
     total = sum(it.amount for it, _ in resolved)
     with db.session() as conn:
-        cur = conn.execute("INSERT INTO invoices(store_name, date, total, engine) VALUES (?,?,?,?)",
-                           (body.store_name, body.date, total, body.engine))
+        cur = conn.execute("INSERT INTO invoices(user_id, store_name, date, total, engine) VALUES (?,?,?,?,?)",
+                           (user["id"], body.store_name, body.date, total, body.engine))
         inv_id = cur.lastrowid
         conn.executemany(
-            "INSERT INTO transactions(date,name,quantity,amount,category,store,invoice_id) VALUES (?,?,?,?,?,?,?)",
-            [(body.date, it.name, it.quantity, it.amount, cat, body.store_name, inv_id) for it, cat in resolved],
+            "INSERT INTO transactions(user_id,date,name,quantity,amount,category,store,invoice_id) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [(user["id"], body.date, it.name, it.quantity, it.amount, cat, body.store_name, inv_id)
+             for it, cat in resolved],
         )
     _log_feedback(feedback)
     return {"invoice_id": inv_id, "saved": len(resolved), "total": total, "feedback_logged": len(feedback)}
@@ -241,8 +318,8 @@ def save_invoice(body: InvoiceSaveIn):
 # ------------------------------------------------------------------ giao dịch
 @app.get("/api/transactions")
 def list_transactions(month: str | None = None, category: str | None = None, q: str | None = None,
-                      limit: int = Query(500, ge=1, le=2000)):
-    sql, args = "SELECT * FROM transactions WHERE 1=1", []
+                      limit: int = Query(500, ge=1, le=2000), user: dict = Depends(auth.current_user)):
+    sql, args = "SELECT * FROM transactions WHERE user_id = ?", [user["id"]]
     if month:
         first, last = insights.month_bounds(valid_month(month))
         sql += " AND date BETWEEN ? AND ?"
@@ -260,69 +337,72 @@ def list_transactions(month: str | None = None, category: str | None = None, q: 
 
 
 @app.post("/api/transactions", status_code=201)
-def create_transaction(tx: TxIn):
+def create_transaction(tx: TxIn, user: dict = Depends(auth.current_user)):
     cat = _resolve_category(tx.name, tx.category)
     with db.session() as conn:
         cur = conn.execute(
-            "INSERT INTO transactions(date,name,quantity,amount,category,store,note) VALUES (?,?,?,?,?,?,?)",
-            (tx.date, tx.name, tx.quantity, tx.amount, cat, tx.store, tx.note))
-        return _tx(conn.execute("SELECT * FROM transactions WHERE id=?", (cur.lastrowid,)).fetchone())
+            "INSERT INTO transactions(user_id,date,name,quantity,amount,category,store,note) VALUES (?,?,?,?,?,?,?,?)",
+            (user["id"], tx.date, tx.name, tx.quantity, tx.amount, cat, tx.store, tx.note))
+        return _tx(conn.execute("SELECT * FROM transactions WHERE id=? AND user_id=?",
+                                (cur.lastrowid, user["id"])).fetchone())
 
 
 @app.put("/api/transactions/{tx_id}")
-def update_transaction(tx_id: int, tx: TxIn):
+def update_transaction(tx_id: int, tx: TxIn, user: dict = Depends(auth.current_user)):
     cat = _resolve_category(tx.name, tx.category)
     with db.session() as conn:
-        old = conn.execute("SELECT * FROM transactions WHERE id=?", (tx_id,)).fetchone()
+        old = conn.execute("SELECT * FROM transactions WHERE id=? AND user_id=?", (tx_id, user["id"])).fetchone()
         if not old:
             raise HTTPException(404, "Không tìm thấy giao dịch")
-        conn.execute("UPDATE transactions SET date=?,name=?,quantity=?,amount=?,category=?,store=?,note=? WHERE id=?",
-                     (tx.date, tx.name, tx.quantity, tx.amount, cat, tx.store, tx.note, tx_id))
+        conn.execute("UPDATE transactions SET date=?,name=?,quantity=?,amount=?,category=?,store=?,note=? "
+                     "WHERE id=? AND user_id=?",
+                     (tx.date, tx.name, tx.quantity, tx.amount, cat, tx.store, tx.note, tx_id, user["id"]))
         if tx.category and tx.category != old["category"]:
             _log_feedback([(tx.name, tx.category)])
-        return _tx(conn.execute("SELECT * FROM transactions WHERE id=?", (tx_id,)).fetchone())
+        return _tx(conn.execute("SELECT * FROM transactions WHERE id=? AND user_id=?", (tx_id, user["id"])).fetchone())
 
 
 @app.delete("/api/transactions/{tx_id}", status_code=204)
-def delete_transaction(tx_id: int):
+def delete_transaction(tx_id: int, user: dict = Depends(auth.current_user)):
     with db.session() as conn:
-        if not conn.execute("DELETE FROM transactions WHERE id=?", (tx_id,)).rowcount:
+        if not conn.execute("DELETE FROM transactions WHERE id=? AND user_id=?", (tx_id, user["id"])).rowcount:
             raise HTTPException(404, "Không tìm thấy giao dịch")
 
 
 # ------------------------------------------------------------------ ngân sách / thống kê
 @app.get("/api/budgets")
-def get_budgets():
+def get_budgets(user: dict = Depends(auth.current_user)):
     with db.session() as conn:
-        rows = {r["category"]: r["monthly_limit"] for r in conn.execute("SELECT * FROM budgets")}
+        rows = {r["category"]: r["monthly_limit"] for r in conn.execute(
+            "SELECT category, monthly_limit FROM user_budgets WHERE user_id = ?", (user["id"],))}
     return {"budgets": [{"category": c, "monthly_limit": rows.get(c, 0)} for c in categories_list()]}
 
 
 @app.put("/api/budgets/{category}")
-def set_budget(category: str, body: BudgetIn):
+def set_budget(category: str, body: BudgetIn, user: dict = Depends(auth.current_user)):
     if category not in categories_list():
         raise HTTPException(422, f"Danh mục không hợp lệ: {category}")
     with db.session() as conn:
         if body.monthly_limit == 0:
-            conn.execute("DELETE FROM budgets WHERE category=?", (category,))
+            conn.execute("DELETE FROM user_budgets WHERE user_id=? AND category=?", (user["id"], category))
         else:
-            conn.execute("INSERT INTO budgets(category, monthly_limit) VALUES (?,?) "
-                         "ON CONFLICT(category) DO UPDATE SET monthly_limit=excluded.monthly_limit",
-                         (category, body.monthly_limit))
+            conn.execute("INSERT INTO user_budgets(user_id, category, monthly_limit) VALUES (?,?,?) "
+                         "ON CONFLICT(user_id, category) DO UPDATE SET monthly_limit=excluded.monthly_limit",
+                         (user["id"], category, body.monthly_limit))
     return {"category": category, "monthly_limit": body.monthly_limit}
 
 
 @app.get("/api/stats")
-def stats(month: str | None = None):
+def stats(month: str | None = None, user: dict = Depends(auth.current_user)):
     with db.session() as conn:
-        return insights.monthly_stats(conn, valid_month(month))
+        return insights.monthly_stats(conn, valid_month(month), user["id"])
 
 
 @app.get("/api/insights")
-def get_insights(month: str | None = None):
+def get_insights(month: str | None = None, user: dict = Depends(auth.current_user)):
     """Hỗ trợ ra quyết định: dự báo cuối tháng, cảnh báo ngân sách, chi tiêu bất thường, lời khuyên."""
     with db.session() as conn:
-        return insights.build_insights(conn, valid_month(month))
+        return insights.build_insights(conn, valid_month(month), user["id"])
 
 
 # ------------------------------------------------------------------ phục vụ giao diện đã build (tùy chọn)

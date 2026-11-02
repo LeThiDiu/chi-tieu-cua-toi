@@ -29,15 +29,15 @@ BUDGETS = {"Ăn uống": 1500000, "Đồ uống": 600000, "Thực phẩm": 80000
            "Giải trí": 500000, "Học tập": 400000}
 
 
-def seed(reset: bool = False) -> tuple[int, int]:
-    """Nạp dữ liệu demo. Trả về (số giao dịch, số ngân sách)."""
+def seed(user_id: int, reset: bool = False) -> tuple[int, int]:
+    """Nạp dữ liệu demo cho một tài khoản. Trả về (số giao dịch, số ngân sách)."""
     random.seed(7)
     db.init_db()
     with db.session() as conn:
         if reset:
-            conn.execute("DELETE FROM transactions")
-            conn.execute("DELETE FROM invoices")
-            conn.execute("DELETE FROM budgets")
+            conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM invoices WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM user_budgets WHERE user_id = ?", (user_id,))
         today = date.today()
         start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
         start = (start - timedelta(days=1)).replace(day=1)  # đầu tháng cách đây 2 tháng
@@ -46,24 +46,25 @@ def seed(reset: bool = False) -> tuple[int, int]:
             for name, cat, lo, hi, per_month in POOL:
                 if random.random() < per_month / 30:
                     amt = round(random.randint(lo, hi), -3)
-                    rows.append((d.isoformat(), name, 1, amt, cat, None))
+                    rows.append((user_id, d.isoformat(), name, 1, amt, cat, None))
             d += timedelta(days=1)
         # vài khoản bất thường để demo cảnh báo
-        rows.append(((today - timedelta(days=3)).isoformat(), "Khám bệnh phòng khám", 1, 1450000, "Y tế", None))
-        rows.append(((today - timedelta(days=5)).isoformat(), "Vé concert", 1, 1800000, "Giải trí", None))
+        rows.append((user_id, (today - timedelta(days=3)).isoformat(), "Khám bệnh phòng khám", 1, 1450000, "Y tế", None))
+        rows.append((user_id, (today - timedelta(days=5)).isoformat(), "Vé concert", 1, 1800000, "Giải trí", None))
         conn.executemany(
-            "INSERT INTO transactions(date,name,quantity,amount,category,store) VALUES (?,?,?,?,?,?)", rows)
+            "INSERT INTO transactions(user_id,date,name,quantity,amount,category,store) VALUES (?,?,?,?,?,?,?)", rows)
         for c, v in BUDGETS.items():
-            conn.execute("INSERT INTO budgets(category, monthly_limit) VALUES (?,?) "
-                         "ON CONFLICT(category) DO UPDATE SET monthly_limit=excluded.monthly_limit", (c, v))
+            conn.execute("INSERT INTO user_budgets(user_id, category, monthly_limit) VALUES (?,?,?) "
+                         "ON CONFLICT(user_id, category) DO UPDATE SET monthly_limit=excluded.monthly_limit",
+                         (user_id, c, v))
     return len(rows), len(BUDGETS)
 
 
-def seed_if_empty() -> bool:
-    """Chỉ nạp demo khi chưa có giao dịch nào. Trả về True nếu đã nạp."""
+def seed_if_empty(user_id: int) -> bool:
+    """Chỉ nạp demo khi tài khoản chưa có giao dịch nào. Trả về True nếu đã nạp."""
     with db.session() as conn:
-        n = conn.execute("SELECT COUNT(*) AS n FROM transactions").fetchone()["n"]
+        n = conn.execute("SELECT COUNT(*) AS n FROM transactions WHERE user_id = ?", (user_id,)).fetchone()["n"]
     if n == 0:
-        seed()
+        seed(user_id)
         return True
     return False

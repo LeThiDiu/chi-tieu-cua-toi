@@ -416,3 +416,35 @@ tbody tr:hover { background: #f8fbf9; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+
+
+/* ---------- đăng nhập / đăng ký ---------- */
+.auth-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: linear-gradient(160deg, #eaf4ee 0%, var(--bg) 55%); }
+.auth-card { width: min(100%, 420px); background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 30px 28px 24px; box-shadow: 0 14px 40px rgba(22, 49, 35, .10); }
+.auth-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; margin-bottom: 18px; color: var(--ink); }
+.auth-card h1 { margin-bottom: 6px; }
+.auth-sub { margin-bottom: 16px; }
+.auth-form { display: flex; flex-direction: column; gap: 14px; }
+.auth-form button.primary { width: 100%; min-height: 46px; }
+.auth-form .field input { min-height: 42px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); cursor: pointer; }
+.check input { width: auto; }
+.auth-switch { margin: 16px 0 0; text-align: center; font-size: 14px; color: var(--muted); }
+.banner .link { margin-left: 8px; font-weight: 600; }
+
+/* ---------- tài khoản trong thanh bên ---------- */
+.user-box { margin-top: auto; display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 12px; background: rgba(255, 255, 255, .06); }
+.user-avatar { display: inline-grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 50%; background: #e8f5ee; color: #145a3e; font-weight: 700; }
+.user-info { min-width: 0; flex: 1; display: flex; flex-direction: column; line-height: 1.25; }
+.user-info strong { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-info small { font-size: 11.5px; color: #b9cdc2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.logout { flex: none; background: transparent; border: 1px solid rgba(255, 255, 255, .28); color: #fff; border-radius: 8px; padding: 6px 9px; font: inherit; font-size: 12.5px; cursor: pointer; }
+button.logout:hover { background: rgba(255, 255, 255, .12); }
+.header-actions { display: flex; align-items: center; gap: 8px; }
+.logout-mobile { display: none; }
+.empty-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0 12px; }
+
+@media (max-width: 860px) {
+  .user-box { display: none; }
+  .logout-mobile { display: inline-block; }
+}
